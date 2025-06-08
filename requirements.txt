@@ -1,0 +1,11 @@
+supabase
+groq
+python-dotenv
+fastapi
+uvicorn
+pydantic
+httpx
+requests
+typing-extensions
+starlette
+anyio
