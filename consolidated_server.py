@@ -30,7 +30,7 @@ import time
 import uuid
 from datetime import datetime
 from typing import List, Optional, Tuple, Dict, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # Third-party imports
 from fastapi import FastAPI, HTTPException, status, Request
@@ -38,7 +38,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field as PydanticField
+from pydantic import BaseModel, Field
 from supabase import create_client, Client
 from groq import Groq
 from dotenv import load_dotenv
@@ -87,27 +87,30 @@ class Config:
 # DATA MODELS
 # ============================================================================
 
+### NEW/MODIFIED ###
 @dataclass
 class ChatSession:
     """Data model for chat sessions"""
     id: str
     user_id: str
     session_name: str
+    student_name: str  # Added field
+    course_code: str   # Added field
     created_at: datetime
-    course_id: Optional[str] = None
-    page_content: Optional[str] = None
 
     @classmethod
-    def create_new(cls, user_id: str, session_name: str = None) -> 'ChatSession':
+    def create_new(cls, user_id: str, student_name: str, course_code: str, session_name: str = None) -> 'ChatSession':
         """Create a new chat session with generated ID"""
         session_id = str(uuid.uuid4())
         if not session_name:
-            session_name = f"Chat Session {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            session_name = f"Chat for {student_name} - {course_code}"
         
         return cls(
             id=session_id,
             user_id=user_id,
             session_name=session_name,
+            student_name=student_name,
+            course_code=course_code,
             created_at=datetime.now()
         )
 
@@ -117,9 +120,9 @@ class ChatSession:
             'id': self.id,
             'user_id': self.user_id,
             'session_name': self.session_name,
-            'created_at': self.created_at.isoformat(),
-            'course_id': self.course_id,
-            'page_content': self.page_content
+            'student_name': self.student_name,
+            'course_code': self.course_code,
+            'created_at': self.created_at.isoformat()
         }
 
 @dataclass
@@ -167,29 +170,35 @@ class Message:
 # API MODELS (Pydantic)
 # ============================================================================
 
-class SessionStartOrGet(BaseModel):
-    user_id: str
-    course_code: str
-    page_content: str
+### NEW/MODIFIED ###
+class StartOrGetSessionRequest(BaseModel):
+    """Request model for starting or getting a session."""
+    student_name: str = Field(..., description="The name of the student")
+    course_code: str = Field(..., description="The course code (e.g., C402)")
+    page_content: Optional[str] = Field(None, description="The content of the current page for context")
 
 class ChatSessionCreate(BaseModel):
     """Request model for creating a new chat session"""
-    user_id: str = PydanticField(..., description="User identifier")
-    session_name: Optional[str] = PydanticField(None, description="Optional session name")
+    user_id: str = Field(..., description="User identifier")
+    session_name: Optional[str] = Field(None, description="Optional session name")
 
+### NEW/MODIFIED ###
 class ChatSessionResponse(BaseModel):
     """Response model for chat session"""
     id: str
     user_id: str
     session_name: str
+    student_name: str
+    course_code: str
     created_at: datetime
-    course_id: Optional[str] = None
-    page_content: Optional[str] = None
 
 class MessageCreate(BaseModel):
     """Request model for sending a message"""
-    session_id: str = PydanticField(..., description="Chat session ID")
-    content: str = PydanticField(..., description="Message content")
+    session_id: str = Field(..., description="Chat session ID")
+    content: str = Field(..., description="Message content")
+    ### NEW/MODIFIED ###
+    page_content: Optional[str] = Field(None, description="The content of the current page for context")
+
 
 class MessageResponse(BaseModel):
     """Response model for a message"""
@@ -242,67 +251,50 @@ class ChatService:
         self.groq_client = Groq(api_key=Config.GROQ_API_KEY)
         logger.info("Chat service initialized successfully")
 
-    async def start_or_get_session(self, user_id: str, course_code: str, page_content: str) -> ChatSessionResponse:
-        """Starts a new session or retrieves an existing one for a user and course."""
-        # Check if a course with the given code exists
-        course_result = self.supabase.table('courses').select('id').eq('course_code', course_code).execute()
-        if not course_result.data:
-            # Create a new course if it doesn't exist
-            new_course_result = self.supabase.table('courses').insert({'course_code': course_code}).execute()
-            course_id = new_course_result.data[0]['id']
-        else:
-            course_id = course_result.data[0]['id']
-
-        # Check if a session already exists for this user and course
-        session_result = self.supabase.table('chat_sessions').select('*').eq('user_id', user_id).eq('course_id', course_id).execute()
-
-        if session_result.data:
-            # If a session exists, update the page_content and return the session
-            session_id = session_result.data[0]['id']
-            self.supabase.table('chat_sessions').update({'page_content': page_content}).eq('id', session_id).execute()
-            return await self.get_session(session_id)
-        else:
-            # If no session exists, create a new one
-            session_name = f"{course_code} Session"
-            session = ChatSession.create_new(user_id=user_id, session_name=session_name)
-            
-            session_dict = session.to_dict()
-            session_dict['course_id'] = course_id
-            session_dict['page_content'] = page_content
-
-            self.supabase.table('chat_sessions').insert(session_dict).execute()
-
-            return ChatSessionResponse(
-                id=session.id,
-                user_id=session.user_id,
-                session_name=session.session_name,
-                created_at=session.created_at,
-                course_id=course_id,
-                page_content=page_content
-            )
-
-    async def create_session(self, user_id: str, session_name: str = None) -> ChatSessionResponse:
-        """Create a new chat session"""
+    ### NEW/MODIFIED ###
+    async def start_or_get_session(self, student_name: str, course_code: str, user_id: str) -> ChatSessionResponse:
+        """
+        Get an existing session for a student and course, or create a new one.
+        """
         try:
-            session = ChatSession.create_new(user_id, session_name)
+            # Check for an existing session
+            result = self.supabase.table('chat_sessions').select('*').eq('student_name', student_name).eq('course_code', course_code).execute()
 
-            # Insert session into Supabase
-            result = self.supabase.table('chat_sessions').insert(session.to_dict()).execute()
+            if result.data:
+                # Session exists, return it
+                session_data = result.data[0]
+                logger.info(f"Reusing session: {session_data['id']} for student: {student_name}")
+                return ChatSessionResponse(
+                    id=session_data['id'],
+                    user_id=session_data['user_id'],
+                    session_name=session_data['session_name'],
+                    student_name=session_data['student_name'],
+                    course_code=session_data['course_code'],
+                    created_at=datetime.fromisoformat(session_data['created_at'].replace('Z', '+00:00'))
+                )
+            else:
+                # No session found, create a new one
+                session = ChatSession.create_new(user_id=user_id, student_name=student_name, course_code=course_code)
+                insert_result = self.supabase.table('chat_sessions').insert(session.to_dict()).execute()
 
-            if not result.data:
-                raise Exception("Failed to create session in database")
+                if not insert_result.data:
+                    raise Exception("Failed to create session in database")
 
-            logger.info(f"Created new session: {session.id} for user: {user_id}")
+                logger.info(f"Created new session: {session.id} for student: {student_name}")
 
-            return ChatSessionResponse(
-                id=session.id,
-                user_id=session.user_id,
-                session_name=session.session_name,
-                created_at=session.created_at
-            )
+                return ChatSessionResponse(
+                    id=session.id,
+                    user_id=session.user_id,
+                    session_name=session.session_name,
+                    student_name=session.student_name,
+                    course_code=session.course_code,
+                    created_at=session.created_at
+                )
+
         except Exception as e:
-            logger.error(f"Error creating session: {e}")
+            logger.error(f"Error in start_or_get_session: {e}")
             raise
+
 
     async def get_session(self, session_id: str) -> Optional[ChatSessionResponse]:
         """Get a chat session by ID"""
@@ -317,9 +309,9 @@ class ChatService:
                 id=session_data['id'],
                 user_id=session_data['user_id'],
                 session_name=session_data['session_name'],
-                created_at=datetime.fromisoformat(session_data['created_at'].replace('Z', '+00:00')),
-                course_id=session_data.get('course_id'),
-                page_content=session_data.get('page_content')
+                student_name=session_data.get('student_name', ''), # Handle older sessions
+                course_code=session_data.get('course_code', ''),  # Handle older sessions
+                created_at=datetime.fromisoformat(session_data['created_at'].replace('Z', '+00:00'))
             )
         except Exception as e:
             logger.error(f"Error getting session {session_id}: {e}")
@@ -336,9 +328,9 @@ class ChatService:
                     id=session_data['id'],
                     user_id=session_data['user_id'],
                     session_name=session_data['session_name'],
-                    created_at=datetime.fromisoformat(session_data['created_at'].replace('Z', '+00:00')),
-                    course_id=session_data.get('course_id'),
-                    page_content=session_data.get('page_content')
+                    student_name=session_data.get('student_name', ''), # Handle older sessions
+                    course_code=session_data.get('course_code', ''),  # Handle older sessions
+                    created_at=datetime.fromisoformat(session_data['created_at'].replace('Z', '+00:00'))
                 ))
 
             return sessions
@@ -400,50 +392,49 @@ class ChatService:
             logger.error(f"Error getting messages for session {session_id}: {e}")
             raise
 
-    async def get_ai_response(self, user_message: str, session_id: str) -> str:
-        """Get AI response from Groq"""
+    ### NEW/MODIFIED ###
+    async def get_ai_response(self, user_message: str, session_id: str, page_content: Optional[str] = None) -> str:
+        """Get AI response from Groq, using provided page content as primary context."""
         try:
-            # Get conversation history and session info
-            session = await self.get_session(session_id)
+            # Get conversation history
             conversation_history = await self.get_session_messages(session_id, limit=20)
 
             # Prepare conversation context with professional Egyptian study buddy personality
-            system_prompt = f"""You are a professional Egyptian study buddy AI assistant. Your personality traits:
+            system_prompt = """You are a professional study buddy AI assistant. Your personality traits:
 
-    🎓 Professional Academic Companion: You're here to help students learn and understand their study materials
-    📚 Context-Only Responses: You ONLY answer questions based on the text/context provided by the user
-    🇪🇬 Egyptian Tutoring Style: Friendly, encouraging, and supportive like a helpful Egyptian tutor
-    🔍 Analytical Approach: Break down complex topics, explain step-by-step, provide examples
-    💡 Mixed Language: Use Arabic for explanations but keep technical terms/equations in English
-    👨‍🎓 Student-Focused: Address the student by name when provided, adapt to their learning level
+🎓 Professional Academic Companion: You're here to help students learn and understand their study materials
+📚 Context-Only Responses: You ONLY answer questions based on the text/context provided by the user
+🔍 Analytical Approach: Break down complex topics, explain step-by-step, provide examples
+👨‍🎓 Student-Focused: Address the student by name when provided, adapt to their learning level
 
-    IMPORTANT RULES:
+IMPORTANT RULES:
 
-    Context Dependency: You can ONLY answer questions about the text/context the user provides. The context is: {session.page_content}
+Context Dependency: You can ONLY answer questions about the text/context the user provides
 
-    No External Knowledge: Don't use information outside the provided context
+No External Knowledge: Don't use information outside the provided context
 
-    Language Adaptation: Match the language of the provided context (Arabic/English/Mixed)
+Professional Tone: Be nice, serious, and helpful - avoid overly casual terms
 
-    Professional Tone: Be nice, serious, and helpful - avoid overly casual terms
+Educational Focus: Always aim to help the student understand, not just provide answers
 
-    Educational Focus: Always aim to help the student understand, not just provide answers
+Response Style:
 
-    Response Style:
+Start with a brief acknowledgment
 
-    Start with a brief acknowledgment
+Provide clear, structured explanations
 
-    Provide clear, structured explanations
+Use examples from the provided context
 
-    Use examples from the provided context
+End with encouragement or follow-up questions
 
-    End with encouragement or follow-up questions
+If no context is provided: Politely ask the student to share the text or material they want help with.
 
-    Keep technical terms in English, explanations in Arabic when appropriate
+Remember: You're a professional academic companion who ONLY works with the provided context! 📚"""
 
-    If no context is provided: Politely ask the student to share the text or material they want help with.
+            # Add the page content to the system prompt if provided
+            if page_content:
+                system_prompt += f"\n\n--- CURRENT PAGE CONTEXT ---\n{page_content}\n--- END OF CONTEXT ---"
 
-    Remember: You're a professional academic companion who ONLY works with the provided context! 📚"""
 
             messages = [
                 {"role": "system", "content": system_prompt}
@@ -473,15 +464,16 @@ class ChatService:
             logger.error(f"Error getting AI response: {e}")
             raise Exception(f"Failed to get AI response: {str(e)}")
 
-    async def chat(self, session_id: str, user_message_content: str) -> Tuple[MessageResponse, MessageResponse]:
+    ### NEW/MODIFIED ###
+    async def chat(self, session_id: str, user_message_content: str, page_content: Optional[str] = None) -> Tuple[MessageResponse, MessageResponse]:
         """Process a chat interaction"""
         try:
             # Create and save user message
             user_message = Message.create_user_message(session_id, user_message_content)
             user_response = await self.save_message(user_message)
 
-            # Get AI response
-            ai_content = await self.get_ai_response(user_message_content, session_id)
+            # Get AI response, passing the page content
+            ai_content = await self.get_ai_response(user_message_content, session_id, page_content)
 
             # Create and save assistant message
             assistant_message = Message.create_assistant_message(session_id, ai_content)
@@ -492,6 +484,7 @@ class ChatService:
         except Exception as e:
             logger.error(f"Error in chat interaction: {e}")
             raise
+
 
     async def health_check(self) -> dict:
         """Check the health of all services"""
@@ -529,7 +522,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/tmp/aiasis.log'),
+        # logging.FileHandler('/tmp/aiasis.log'), # Commented out for Railway
         logging.StreamHandler()
     ]
 )
@@ -627,7 +620,7 @@ async def root():
     }
 
 @app.get("/health", response_model=HealthResponse)
-async def health_check():
+async def health_check_endpoint():
     """Health check endpoint"""
     try:
         chat_service = get_chat_service()
@@ -652,17 +645,23 @@ async def health_check():
             version="3.0.0"
         )
 
+
+### NEW/MODIFIED ###
 @app.post("/sessions/start_or_get", response_model=ChatSessionResponse)
-async def start_or_get_session(session_data: SessionStartOrGet):
+async def start_or_get_session(session_data: StartOrGetSessionRequest):
     """
-    Starts a new session or retrieves an existing one for a user and course.
+    Starts a new session or retrieves an existing one based on student name and course code.
+    This is the primary endpoint for initiating a chat.
     """
     try:
         chat_service = get_chat_service()
+        # You can use a placeholder for user_id or link it to an actual user system if you have one
+        user_id = session_data.student_name 
+        
         session = await chat_service.start_or_get_session(
-            user_id=session_data.user_id,
+            student_name=session_data.student_name,
             course_code=session_data.course_code,
-            page_content=session_data.page_content
+            user_id=user_id
         )
         return session
     except Exception as e:
@@ -672,22 +671,6 @@ async def start_or_get_session(session_data: SessionStartOrGet):
             detail="Failed to start or get session"
         )
 
-@app.post("/sessions", response_model=ChatSessionResponse)
-async def create_session(session_data: ChatSessionCreate):
-    """Create a new chat session"""
-    try:
-        chat_service = get_chat_service()
-        session = await chat_service.create_session(
-            user_id=session_data.user_id,
-            session_name=session_data.session_name
-        )
-        return session
-    except Exception as e:
-        logger.error(f"Failed to create session: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create session"
-        )
 
 @app.get("/sessions/{session_id}", response_model=ChatSessionResponse)
 async def get_session(session_id: str):
@@ -724,6 +707,7 @@ async def get_user_sessions(user_id: str):
             detail="Failed to retrieve user sessions"
         )
 
+### NEW/MODIFIED ###
 @app.post("/chat", response_model=ChatResponse)
 async def chat(message_data: MessageCreate):
     """Send a message and get AI response"""
@@ -740,7 +724,8 @@ async def chat(message_data: MessageCreate):
         # Process chat interaction
         user_message, assistant_message = await chat_service.chat(
             session_id=message_data.session_id,
-            user_message_content=message_data.content
+            user_message_content=message_data.content,
+            page_content=message_data.page_content
         )
 
         return ChatResponse(
@@ -883,7 +868,7 @@ def run_development():
 
         # Start the server
         uvicorn.run(
-            "__main__:app",
+            "__main__:app",  # Adjusted for running directly
             host=host,
             port=port,
             reload=True,
@@ -915,7 +900,7 @@ def run_production():
 
         # Start the server
         uvicorn.run(
-            "__main__:app",
+            "__main__:app", # Adjusted for running directly
             host=host,
             port=port,
             reload=False,
