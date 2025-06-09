@@ -25,7 +25,7 @@ from typing import List, Optional, Tuple, Dict, Any
 from dataclasses import dataclass
 
 # Third-party imports
-from fastapi import FastAPI, HTTPException, status, Request, Body
+from fastapi import FastAPI, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -236,17 +236,6 @@ class ChatService:
 
             logger.info(f"Created new session: {session.id} for user: {user_id}")
 
-            # Only show welcome message for initial session creation
-            if isInitialMessage:
-                messages.append({
-                    "role": "assistant",
-                    "content": f'''Hello {user_id.split(' ')[0]}, 
-I'm here to help you understand the specific content you provide.
-Please share the text you'd like to study, and I'll assist you in understanding it.
-
-Note: I can only answer questions about content you share with me. 📚'''
-                })
-
             return ChatSessionResponse(
                 id=session.id,
                 user_id=session.user_id,
@@ -332,7 +321,6 @@ Note: I can only answer questions about content you share with me. 📚'''
     async def get_session_messages(self, session_id: str, limit: int = 50) -> List[Message]:
         """Get messages for a session"""
         try:
-            # Include system messages in the query but handle them specially in the chat method
             result = self.supabase.table('messages').select('*').eq('session_id', session_id).order('timestamp', desc=False).limit(limit).execute()
 
             messages = []
@@ -350,9 +338,51 @@ Note: I can only answer questions about content you share with me. 📚'''
             logger.error(f"Error getting messages for session {session_id}: {e}")
             raise
 
-    async def get_ai_response(self, messages: List[Dict[str, str]]) -> str:
+    async def get_ai_response(self, user_message: str, session_id: str) -> str:
         """Get AI response from Groq"""
         try:
+            # Get conversation history
+            conversation_history = await self.get_session_messages(session_id, limit=20)
+
+            # Prepare conversation context with professional Egyptian study buddy personality
+            system_prompt = """You are a professional Egyptian study buddy AI assistant. Your personality traits:
+
+🎓 **Professional Academic Companion**: You're here to help students learn and understand their study materials
+📚 **Context-Only Responses**: You ONLY answer questions based on the text/context provided by the user
+🇪🇬 **Egyptian Tutoring Style**: Friendly, encouraging, and supportive like a helpful Egyptian tutor
+🔍 **Analytical Approach**: Break down complex topics, explain step-by-step, provide examples
+💡 **Mixed Language**: Use Arabic for explanations but keep technical terms/equations in English
+👨‍🎓 **Student-Focused**: Address the student by name when provided, adapt to their learning level
+
+**IMPORTANT RULES:**
+1. **Context Dependency**: You can ONLY answer questions about the text/context the user provides
+2. **No External Knowledge**: Don't use information outside the provided context
+3. **Language Adaptation**: Match the language of the provided context (Arabic/English/Mixed)
+4. **Professional Tone**: Be nice, serious, and helpful - avoid overly casual terms
+5. **Educational Focus**: Always aim to help the student understand, not just provide answers
+
+**Response Style:**
+- Start with a brief acknowledgment
+- Provide clear, structured explanations
+- Use examples from the provided context
+- End with encouragement or follow-up questions
+- Keep technical terms in English, explanations in Arabic when appropriate
+
+**If no context is provided**: Politely ask the student to share the text or material they want help with.
+
+Remember: You're a professional academic companion who ONLY works with the provided context! 📚"""
+
+            messages = [
+                {"role": "system", "content": system_prompt}
+            ]
+
+            # Add conversation history (last 10 messages for context)
+            for msg in conversation_history[-10:]:
+                messages.append({"role": msg.role, "content": msg.content})
+
+            # Add current user message
+            messages.append({"role": "user", "content": user_message})
+
             # Get response from Groq using updated API
             completion = self.groq_client.chat.completions.create(
                 model=Config.AI_MODEL,
@@ -373,60 +403,12 @@ Note: I can only answer questions about content you share with me. 📚'''
     async def chat(self, session_id: str, user_message_content: str) -> Tuple[MessageResponse, MessageResponse]:
         """Process a chat interaction"""
         try:
-            # Check if this is a context-setting message
-            is_context_message = (
-                'IMPORTANT: I am currently viewing page' in user_message_content or
-                'Please keep this text as context' in user_message_content
-            )
-
-            if is_context_message:
-                # Save as a system message instead of user message
-                context_message = Message(
-                    id=str(uuid.uuid4()),
-                    session_id=session_id,
-                    role='system',
-                    content=user_message_content,
-                    timestamp=datetime.now()
-                )
-                await self.save_message(context_message)
-                
-                # Return empty responses to prevent showing in chat
-                empty_response = MessageResponse(
-                    id=str(uuid.uuid4()),
-                    session_id=session_id,
-                    role='system',
-                    content='',
-                    timestamp=datetime.now()
-                )
-                return empty_response, empty_response
-
             # Create and save user message
             user_message = Message.create_user_message(session_id, user_message_content)
             user_response = await self.save_message(user_message)
 
-            # Get conversation history including system messages
-            conversation_history = await self.get_session_messages(session_id, limit=20)
-            
-            # Prepare messages for AI, including system messages
-            messages = [{"role": "system", "content": system_prompt}]
-            
-            # Add system messages (context) first
-            context_messages = [msg for msg in conversation_history if msg.role == 'system']
-            if context_messages:
-                # Use the most recent context
-                latest_context = context_messages[-1]
-                messages.append({"role": "system", "content": latest_context.content})
-
-            # Add conversation history (excluding system messages)
-            for msg in conversation_history:
-                if msg.role != 'system':
-                    messages.append({"role": msg.role, "content": msg.content})
-
-            # Add current user message
-            messages.append({"role": "user", "content": user_message_content})
-
             # Get AI response
-            ai_content = await self.get_ai_response(messages)
+            ai_content = await self.get_ai_response(user_message_content, session_id)
 
             # Create and save assistant message
             assistant_message = Message.create_assistant_message(session_id, ai_content)
@@ -523,10 +505,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={
-            "error": "An error occurred while processing your request",
-            "detail": "Please try again. If the problem persists, contact support."
-        }
+        content={"error": "Internal server error", "detail": "An unexpected error occurred"}
     )
 
 # Serve static files (if directory exists)
@@ -706,7 +685,7 @@ async def get_session_messages(session_id: str, limit: int = 50):
         # Get messages
         messages = await chat_service.get_session_messages(session_id, limit)
 
-        # Convert to response format, excluding system messages
+        # Convert to response format
         message_responses = [
             MessageResponse(
                 id=msg.id,
@@ -714,7 +693,7 @@ async def get_session_messages(session_id: str, limit: int = 50):
                 role=msg.role,
                 content=msg.content,
                 timestamp=msg.timestamp
-            ) for msg in messages if msg.role != 'system'  # Exclude system messages from display
+            ) for msg in messages
         ]
 
         return MessageHistoryResponse(
@@ -758,67 +737,6 @@ async def delete_session(session_id: str):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete session"
-        )
-
-@app.post("/sessions/{session_id}/context", response_model=MessageResponse)
-async def set_session_context(
-    session_id: str,
-    context: dict = Body(..., example={
-        "page_number": 1,
-        "total_pages": 10,
-        "file_name": "example.pdf",
-        "content": "The content of the current page..."
-    })
-):
-    """Set or update the context for a session"""
-    try:
-        chat_service = get_chat_service()
-        
-        # Verify session exists
-        session = await chat_service.get_session(session_id)
-        if not session:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Session not found"
-            )
-
-        # Format context message
-        context_content = f"""SYSTEM CONTEXT:
-Current page: {context.get('page_number', 'N/A')} of {context.get('total_pages', 'N/A')}
-Document: {context.get('file_name', 'N/A')}
-
-Content:
-{context.get('content', '')}
-
-Instructions: Use this content as the primary context for answering questions. Only answer based on this content."""
-
-        # Create and save context as system message
-        context_message = Message(
-            id=str(uuid.uuid4()),
-            session_id=session_id,
-            role='system',
-            content=context_content,
-            timestamp=datetime.now()
-        )
-        
-        # Save to database
-        result = await chat_service.save_message(context_message)
-        
-        return MessageResponse(
-            id=result.id,
-            session_id=result.session_id,
-            role=result.role,
-            content="Context updated successfully",
-            timestamp=result.timestamp
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to set context for session {session_id}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to set session context"
         )
 
 # ============================================================================
