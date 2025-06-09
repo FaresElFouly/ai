@@ -240,11 +240,11 @@ class ChatService:
             if isInitialMessage:
                 messages.append({
                     "role": "assistant",
-                    "content": f'''Hello {user_id.split(' ')[0]}! 
-I'm here to help you understand the provided content.
-Feel free to ask any questions, and I'll help you understand them better.
+                    "content": f'''Hello {user_id.split(' ')[0]}, 
+I'm here to help you understand the specific content you provide.
+Please share the text you'd like to study, and I'll assist you in understanding it.
 
-How can I assist you today? 🌟'''
+Note: I can only answer questions about content you share with me. 📚'''
                 })
 
             return ChatSessionResponse(
@@ -332,6 +332,7 @@ How can I assist you today? 🌟'''
     async def get_session_messages(self, session_id: str, limit: int = 50) -> List[Message]:
         """Get messages for a session"""
         try:
+            # Include system messages in the query but handle them specially in the chat method
             result = self.supabase.table('messages').select('*').eq('session_id', session_id).order('timestamp', desc=False).limit(limit).execute()
 
             messages = []
@@ -349,53 +350,9 @@ How can I assist you today? 🌟'''
             logger.error(f"Error getting messages for session {session_id}: {e}")
             raise
 
-    async def get_ai_response(self, user_message: str, session_id: str) -> str:
+    async def get_ai_response(self, messages: List[Dict[str, str]]) -> str:
         """Get AI response from Groq"""
         try:
-            # Get conversation history
-            conversation_history = await self.get_session_messages(session_id, limit=20)
-
-            # Prepare conversation context with professional English study buddy personality
-            system_prompt = """You are a professional and friendly study buddy AI assistant. Your personality traits:
-
-🎓 **Professional Academic Companion**: You're here to help students learn and understand their study materials effectively
-📚 **Context-Only Responses**: You ONLY answer questions based on the text/context provided by the user
-🤝 **Supportive Teaching Style**: Professional, encouraging, and supportive like a helpful tutor
-🔍 **Analytical Approach**: Break down complex topics, explain step-by-step, provide clear examples
-💡 **Clear Communication**: Use clear, professional English with appropriate academic terminology
-👨‍🎓 **Student-Focused**: Address the student by their first name, adapt to their learning level
-
-**IMPORTANT RULES:**
-1. **Context Dependency**: You can ONLY answer questions about the text/context the user provides
-2. **No External Knowledge**: Don't use information outside the provided context
-3. **Language**: Always respond in clear, professional English
-4. **Professional Tone**: Maintain a friendly but professional tone
-5. **Educational Focus**: Help students understand concepts, not just provide answers
-6. **Welcome Messages**: Always start welcome messages with "Hello [first name]"
-
-**Response Style:**
-- Start with "Hello [first name]" for first messages
-- Provide clear, structured explanations
-- Use examples from the provided context
-- Break down complex concepts into simpler terms
-- End with encouragement or thought-provoking follow-up questions
-- Use proper academic/technical terminology when relevant
-
-**If no context is provided**: Politely ask the student to share the text or material they want help with.
-
-Remember: You're a professional academic companion who ONLY works with the provided context! 📚"""
-
-            messages = [
-                {"role": "system", "content": system_prompt}
-            ]
-
-            # Add conversation history (last 10 messages for context)
-            for msg in conversation_history[-10:]:
-                messages.append({"role": msg.role, "content": msg.content})
-
-            # Add current user message
-            messages.append({"role": "user", "content": user_message})
-
             # Get response from Groq using updated API
             completion = self.groq_client.chat.completions.create(
                 model=Config.AI_MODEL,
@@ -416,12 +373,60 @@ Remember: You're a professional academic companion who ONLY works with the provi
     async def chat(self, session_id: str, user_message_content: str) -> Tuple[MessageResponse, MessageResponse]:
         """Process a chat interaction"""
         try:
+            # Check if this is a context-setting message
+            is_context_message = (
+                'IMPORTANT: I am currently viewing page' in user_message_content or
+                'Please keep this text as context' in user_message_content
+            )
+
+            if is_context_message:
+                # Save as a system message instead of user message
+                context_message = Message(
+                    id=str(uuid.uuid4()),
+                    session_id=session_id,
+                    role='system',
+                    content=user_message_content,
+                    timestamp=datetime.now()
+                )
+                await self.save_message(context_message)
+                
+                # Return empty responses to prevent showing in chat
+                empty_response = MessageResponse(
+                    id=str(uuid.uuid4()),
+                    session_id=session_id,
+                    role='system',
+                    content='',
+                    timestamp=datetime.now()
+                )
+                return empty_response, empty_response
+
             # Create and save user message
             user_message = Message.create_user_message(session_id, user_message_content)
             user_response = await self.save_message(user_message)
 
+            # Get conversation history including system messages
+            conversation_history = await self.get_session_messages(session_id, limit=20)
+            
+            # Prepare messages for AI, including system messages
+            messages = [{"role": "system", "content": system_prompt}]
+            
+            # Add system messages (context) first
+            context_messages = [msg for msg in conversation_history if msg.role == 'system']
+            if context_messages:
+                # Use the most recent context
+                latest_context = context_messages[-1]
+                messages.append({"role": "system", "content": latest_context.content})
+
+            # Add conversation history (excluding system messages)
+            for msg in conversation_history:
+                if msg.role != 'system':
+                    messages.append({"role": msg.role, "content": msg.content})
+
+            # Add current user message
+            messages.append({"role": "user", "content": user_message_content})
+
             # Get AI response
-            ai_content = await self.get_ai_response(user_message_content, session_id)
+            ai_content = await self.get_ai_response(messages)
 
             # Create and save assistant message
             assistant_message = Message.create_assistant_message(session_id, ai_content)
@@ -698,7 +703,7 @@ async def get_session_messages(session_id: str, limit: int = 50):
         # Get messages
         messages = await chat_service.get_session_messages(session_id, limit)
 
-        # Convert to response format
+        # Convert to response format, excluding system messages
         message_responses = [
             MessageResponse(
                 id=msg.id,
@@ -706,7 +711,7 @@ async def get_session_messages(session_id: str, limit: int = 50):
                 role=msg.role,
                 content=msg.content,
                 timestamp=msg.timestamp
-            ) for msg in messages
+            ) for msg in messages if msg.role != 'system'  # Exclude system messages from display
         ]
 
         return MessageHistoryResponse(
