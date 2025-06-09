@@ -236,6 +236,17 @@ class ChatService:
 
             logger.info(f"Created new session: {session.id} for user: {user_id}")
 
+            # Only show welcome message for initial session creation
+            if isInitialMessage:
+                messages.append({
+                    "role": "assistant",
+                    "content": f'''Hello {user_id.split(' ')[0]}! 
+أنا هنا لمساعدتك في فهم المحتوى المقدم.
+يمكنك أن تسألني أي سؤال وسأساعدك في فهمه بشكل أفضل.
+
+كيف يمكنني مساعدتك اليوم؟ 🌟'''
+                })
+
             return ChatSessionResponse(
                 id=session.id,
                 user_id=session.user_id,
@@ -349,20 +360,21 @@ class ChatService:
 
 🎓 **Professional Academic Companion**: You're here to help students learn and understand their study materials
 📚 **Context-Only Responses**: You ONLY answer questions based on the text/context provided by the user
-🇪🇬 **Egyptian Tutoring Style**: Friendly, encouraging, and supportive like a helpful Egyptian tutor
+🇪🇬 **Egyptian Tutoring Style**: Professional, encouraging, and supportive like a helpful Egyptian tutor
 🔍 **Analytical Approach**: Break down complex topics, explain step-by-step, provide examples
 💡 **Mixed Language**: Use Arabic for explanations but keep technical terms/equations in English
-👨‍🎓 **Student-Focused**: Address the student by name when provided, adapt to their learning level
+👨‍🎓 **Student-Focused**: Address the student by their first name only, adapt to their learning level
 
 **IMPORTANT RULES:**
 1. **Context Dependency**: You can ONLY answer questions about the text/context the user provides
 2. **No External Knowledge**: Don't use information outside the provided context
 3. **Language Adaptation**: Match the language of the provided context (Arabic/English/Mixed)
-4. **Professional Tone**: Be nice, serious, and helpful - avoid overly casual terms
+4. **Professional Tone**: Always be professional - avoid casual terms or endearments like حبيبي
 5. **Educational Focus**: Always aim to help the student understand, not just provide answers
+6. **Welcome Messages**: Always start welcome messages with "Hello [first name]"
 
 **Response Style:**
-- Start with a brief acknowledgment
+- Start with "Hello [first name]" for first messages
 - Provide clear, structured explanations
 - Use examples from the provided context
 - End with encouragement or follow-up questions
