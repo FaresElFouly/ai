@@ -418,7 +418,34 @@ Now, calmly and patiently help `{student_name}` with their question.
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="AI Study Buddy API", version="3.2.0")
+# Global service instance
+_chat_service = None
+def get_chat_service() -> ChatService:
+    global _chat_service
+    if _chat_service is None:
+        _chat_service = ChatService()
+    return _chat_service
+
+### EDITED ### - This is the new, recommended 'lifespan' manager
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Code to run on startup
+    logger.info("Starting AI Study Buddy API...")
+    get_chat_service() # Initialize services
+    logger.info("Startup complete. Services are ready.")
+    
+    yield # The application runs while the 'yield' is active
+    
+    # Code to run on shutdown
+    logger.info("Shutting down AI Study Buddy API...")
+
+### EDITED ### - The lifespan manager is passed to the FastAPI instance here
+app = FastAPI(
+    title="AI Study Buddy API", 
+    version="3.2.1",
+    lifespan=lifespan
+)
+
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
@@ -429,14 +456,6 @@ async def add_process_time_header(request: Request, call_next):
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = str(process_time)
     return response
-
-# Global service instance
-_chat_service = None
-def get_chat_service() -> ChatService:
-    global _chat_service
-    if _chat_service is None:
-        _chat_service = ChatService()
-    return _chat_service
 
 # ============================================================================
 # API ENDPOINTS
@@ -562,7 +581,12 @@ async def startup_event():
     get_chat_service()
 
 if __name__ == "__main__":
-    # Assumes development mode for direct execution
-    # For production, use a proper WSGI server like Gunicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    # This block is for local development. 
+    # Railway will use the "Start Command" you set in the dashboard, not this.
+    print("--- Starting in LOCAL DEVELOPMENT mode ---")
+    uvicorn.run(
+        "consolidated_server:app", # Use the correct filename here
+        host="127.0.0.1", 
+        port=8000, 
+        reload=True # Reload is great for development
+    )
