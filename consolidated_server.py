@@ -25,7 +25,7 @@ from typing import List, Optional, Tuple, Dict, Any
 from dataclasses import dataclass
 
 # Third-party imports
-from fastapi import FastAPI, HTTPException, status, Request
+from fastapi import FastAPI, HTTPException, status, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -523,7 +523,10 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"error": "Internal server error", "detail": "An unexpected error occurred"}
+        content={
+            "error": "An error occurred while processing your request",
+            "detail": "Please try again. If the problem persists, contact support."
+        }
     )
 
 # Serve static files (if directory exists)
@@ -755,6 +758,67 @@ async def delete_session(session_id: str):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete session"
+        )
+
+@app.post("/sessions/{session_id}/context", response_model=MessageResponse)
+async def set_session_context(
+    session_id: str,
+    context: dict = Body(..., example={
+        "page_number": 1,
+        "total_pages": 10,
+        "file_name": "example.pdf",
+        "content": "The content of the current page..."
+    })
+):
+    """Set or update the context for a session"""
+    try:
+        chat_service = get_chat_service()
+        
+        # Verify session exists
+        session = await chat_service.get_session(session_id)
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Session not found"
+            )
+
+        # Format context message
+        context_content = f"""SYSTEM CONTEXT:
+Current page: {context.get('page_number', 'N/A')} of {context.get('total_pages', 'N/A')}
+Document: {context.get('file_name', 'N/A')}
+
+Content:
+{context.get('content', '')}
+
+Instructions: Use this content as the primary context for answering questions. Only answer based on this content."""
+
+        # Create and save context as system message
+        context_message = Message(
+            id=str(uuid.uuid4()),
+            session_id=session_id,
+            role='system',
+            content=context_content,
+            timestamp=datetime.now()
+        )
+        
+        # Save to database
+        result = await chat_service.save_message(context_message)
+        
+        return MessageResponse(
+            id=result.id,
+            session_id=result.session_id,
+            role=result.role,
+            content="Context updated successfully",
+            timestamp=result.timestamp
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to set context for session {session_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to set session context"
         )
 
 # ============================================================================
